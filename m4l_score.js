@@ -249,19 +249,22 @@ function calcBarsToShow(numBars, allEvents, TPBAR) {
     return 1;
 }
 
+function getNumBars() {
+    var TPBAR = timeSig.num * TPBEAT;
+    if (clipNotes.length === 0) return 1;
+    var maxEnd = clipNotes.reduce(function(mx, n){
+        return Math.max(mx, Math.round((n.start_time + n.duration) * TPBEAT));
+    }, 0);
+    return Math.max(1, Math.ceil(maxEnd / TPBAR));
+}
+
 function draw() {
     try {
         if (!container) return;
         container.innerHTML = "";
 
         var TPBAR = timeSig.num * TPBEAT;
-        var numBars = 1;
-        if (clipNotes.length > 0) {
-            var maxEnd = clipNotes.reduce(function(mx, n){
-                return Math.max(mx, Math.round((n.start_time + n.duration) * TPBEAT));
-            }, 0);
-            numBars = Math.ceil(maxEnd / TPBAR);
-        }
+        var numBars = getNumBars();
         if (currentBar >= numBars) currentBar = Math.max(0, numBars - 1);
 
         var allEvents = clipNotes.map(function(n){
@@ -379,6 +382,16 @@ function setupMaxBindings() {
 
     window.max.bindInlet("bar_index", function(n) {
         currentBar = Math.max(0, Math.floor(n));
+        draw();
+    });
+
+    window.max.bindInlet("bar_next", function() {
+        currentBar = Math.min(currentBar + 1, getNumBars() - 1);
+        draw();
+    });
+
+    window.max.bindInlet("bar_prev", function() {
+        currentBar = Math.max(0, currentBar - 1);
         draw();
     });
 
