@@ -1,18 +1,20 @@
 // ================================================================
-// m4l_score.js  v6
+// m4l_score.js  v7  Phase 1
 //
-// 主な修正:
-//  1. formatToStave() 使用 → ト音記号・拍子記号スペースを自動除外して正確な音符間隔
-//  2. 音符種別ごとの幅テーブル → 全音符は広く、32分は狭く
-//  3. M4L エフェクトエリア 169px 対応 → ROW_H=120, STAVE_Y=22
-//  4. align_rests: true → 休符を拍の位置に正しく配置
+// [VexFlow 5.0.0 対応]
+//   グローバル名: window.VexFlow（v4 の window.Vex.Flow から変更）
 //
-// 将来の2段表示（右手・左手）設計メモ:
-//  - 1小節あたり treble Stave + bass Stave を y 方向に並べる
-//  - joinVoices を stave ごとに分けて呼ぶ (accidental collision 対策)
-//  - formatToStave([trebleV, bassV], trebleStave) で横位置を統一
-//  - StaveConnector(trebleStave, bassStave).setType(StaveConnector.type.BRACE) でブレース
-//  - device height を約 280px に拡張 (Presentation モードで patcher サイズ調整)
+// [IOI クオンタイズエンジン]
+//   start_time → 4 tick グリッド補正（3連符・5連符にも対応）
+//   書くべき音価を IOI（次音符までの距離）× 実音長 で決定
+//   ・実音長 >= IOI×50% → 実音長優先（サステイン・レガート）
+//   ・実音長 <  IOI×50% → IOI 優先（スタッカート）
+//   ・後続が休符のとき "最後の音符" の IOI が膨張する問題を
+//     パターン補正（前の音符の1.5倍超 & 実音長が前より短い場合）で解決
+//
+// [1小節表示 + SVG viewBox 自動スケーリング]
+//   currentBar で表示小節を管理（bar_index メッセージで切り替え）
+//   W_virtual を音符密度から算出 → viewBox で M4L 169px に自動フィット
 // ================================================================
 
 window.onerror = function(msg, src, line) {
@@ -21,20 +23,28 @@ window.onerror = function(msg, src, line) {
 };
 function maxLog(m) { if (window.max && max.post) max.post("LOG: " + m); }
 
+// ── VexFlow 5: グローバル名は window.VexFlow ───────────────────
 const { Renderer, Stave, StaveNote, Voice, Formatter,
-        Accidental, Barline, Beam, Tuplet, Dot } = Vex.Flow;
+        Accidental, Barline, Beam, Tuplet, Dot,
+        StaveConnector } = VexFlow;
 
 const container = document.getElementById("score-container");
 
-let currentLiveNotes = new Set();
-let clipNotes = [];
-let timeSig   = { num: 4, den: 4 };
+// ── 状態変数 ─────────────────────────────────────────────────────
+let clipNotes  = [];
+let timeSig    = { num: 4, den: 4 };
+let currentBar = 0;
 
-// ── 定数 ──────────────────────────────────────────────────────────
-const TPBEAT  = 480;
-const TOL     = 12;
-const ROW_H   = 120;   // 1段あたり高さ (M4L 169px に合わせて縮小)
-const STAVE_Y = 22;    // 各段内の五線 Y オフセット
+// ── 定数 ─────────────────────────────────────────────────────────
+const TPBEAT    = 480;
+const TOL       = 12;
+const TUP_TOL   = 35;     // 連符検出の許容誤差（3連符レガート対応）
+const GRID      = 4;      // 位置補正グリッド — 3連符(160, 80 ticks)を正しく扱うため細粒度
+const IOI_RATIO = 0.50;   // IOI 判定閾値（実音長が IOI のこの割合以上なら実音長優先）
+const H_VIRTUAL = 160;    // SVG 仮想高さ (px) — 固定
+const K_NOTE    = 58;     // 音符 1 つあたりの仮想幅 (px)
+const MIN_W     = 420;    // 最小仮想幅
+const CLEF_W    = 98;     // ト音記号 + 拍子記号の幅
 
 // 音符テーブル
 const STD_NOTES = [
@@ -43,7 +53,7 @@ const STD_NOTES = [
     {t:120, v:"16"},{t:90,  v:"32d"},{t:60, v:"32"}
 ];
 
-// 休符テーブル（ドットなし ← VexFlow 互換性確保）
+// 休符テーブル（ドットなし — VexFlow 安定のため）
 const REST_VALS = [
     {t:1920,v:"wr"},{t:960,v:"hr"},{t:480,v:"qr"},
     {t:240,v:"8r"}, {t:120,v:"16r"},{t:60,v:"32r"}
@@ -60,8 +70,8 @@ const TUPLETS = [
     {n:6,t: 80,total:480, vex:"16",occ:4},
 ];
 
-// 音符種別ごとの基本幅 (px) ─ 長い音符ほど広く
-const NOTE_W = { w:52, h:42, q:34, "8":28, "16":23, "32":19 };
+// 音符種別ごとの仮想幅（仮想 W 計算用）
+const NOTE_W_MAP = { w:52, h:42, q:34, "8":28, "16":23, "32":19 };
 
 // ── ユーティリティ ────────────────────────────────────────────────
 function midiToKey(midi) {
@@ -70,7 +80,7 @@ function midiToKey(midi) {
 }
 
 function snapStd(ticks) {
-    let best = STD_NOTES[STD_NOTES.length-1], diff = Infinity;
+    let best = STD_NOTES[STD_NOTES.length - 1], diff = Infinity;
     for (const d of STD_NOTES) {
         const e = Math.abs(ticks - d.t);
         if (e < diff) { diff = e; best = d; }
@@ -81,59 +91,87 @@ function snapStd(ticks) {
 function makeRests(ticks) {
     const rests = [];
     while (ticks >= 60) {
-        let found = false;
+        let ok = false;
         for (const rv of REST_VALS) {
             if (rv.t <= ticks) {
                 rests.push(new StaveNote({ keys: ["b/4"], duration: rv.v }));
-                ticks -= rv.t;
-                found = true; break;
+                ticks -= rv.t; ok = true; break;
             }
         }
-        if (!found) break;
+        if (!ok) break;
     }
     return rests;
 }
 
-// ── 音符生成
-//   VexFlow 4 では Dot.buildAndAttach() を明示的に呼ばないとドットが描画されない
-// ─────────────────────────────────────────────────────────────────
+// ── 音符生成 ─────────────────────────────────────────────────────
 function makeNote(pitches, vexDur) {
-    const keys = pitches.slice().sort((a,b)=>a-b).map(midiToKey);
+    const keys = pitches.slice().sort((a,b) => a-b).map(midiToKey);
     const note = new StaveNote({ keys, duration: vexDur });
 
-    // ドット描画: VexFlow 4 必須
+    // VexFlow 4/5 共通: Dot.buildAndAttach が必須
     if (vexDur.includes("d") && !vexDur.endsWith("r")) {
         try { Dot.buildAndAttach([note]); } catch(e) {}
     }
-
-    note.setStyle({ fillStyle: "black", strokeStyle: "black" });
     keys.forEach((k, i) => {
         if (k.includes("#")) note.addModifier(new Accidental("#"), i);
     });
     return note;
 }
 
-function groupByTick(events) {
+// ── IOI ベースのコードグルーピング ───────────────────────────────
+//
+// 書くべき音価を「次音符までの距離 (IOI)」と「実音長」の比較で決定。
+// スタッカートなら IOI、サステインなら実音長を優先。
+//
+// 【パターン補正】
+//   後続に休符があるとき、最後の音符の IOI が barEnd まで伸びて
+//   音価が膨張する。前の音符の dur の 1.5 倍を超え、かつ実音長が
+//   前より短い場合は、前の音符の dur に揃える。
+// ─────────────────────────────────────────────────────────────────
+function groupByTickIOI(events, barEnd) {
+    // 1. 1/32 グリッドにスナップしてコード（和音）に集約
     const map = {};
     for (const e of events) {
-        if (!map[e.st]) map[e.st] = { tick: e.st, dur: 0, pitches: [] };
-        map[e.st].pitches.push(e.pitch);
-        map[e.st].dur = Math.max(map[e.st].dur, e.dur);
+        const s = Math.round(e.st / GRID) * GRID;
+        if (!map[s]) map[s] = { tick: s, soundDur: 0, pitches: [] };
+        map[s].pitches.push(e.pitch);
+        map[s].soundDur = Math.max(map[s].soundDur, e.dur);
     }
-    return Object.values(map).sort((a,b) => a.tick - b.tick);
+    const groups = Object.values(map).sort((a, b) => a.tick - b.tick);
+
+    // 2. IOI 計算 → 書くべき dur を決定
+    for (let i = 0; i < groups.length; i++) {
+        const nextTick = i + 1 < groups.length ? groups[i + 1].tick : barEnd;
+        const ioi      = Math.min(nextTick - groups[i].tick, barEnd - groups[i].tick);
+        const sound    = groups[i].soundDur;
+        groups[i].dur  = sound >= ioi * IOI_RATIO ? sound : ioi;
+    }
+
+    // 3. パターン補正: dur > prev×1.5 かつ soundDur < dur×0.5 → prev に揃える
+    //    ・休符前の最後の音符 IOI 膨張を解消
+    //    ・連符最終音符（レガート/スタッカート両対応）の膨張も解消
+    for (let i = 1; i < groups.length; i++) {
+        const prev = groups[i - 1].dur;
+        if (groups[i].dur > prev * 1.5 && groups[i].soundDur < groups[i].dur * 0.5) {
+            groups[i].dur = Math.min(prev, barEnd - groups[i].tick);
+        }
+    }
+
+    return groups;
 }
 
+// ── 連符検出 ──────────────────────────────────────────────────────
 function tryDetectTuplet(groups, gi) {
     const g0 = groups[gi];
     const candidates = TUPLETS
-        .filter(d => Math.abs(g0.dur - d.t) <= TOL)
-        .sort((a,b) => b.n - a.n);
+        .filter(d => Math.abs(g0.dur - d.t) <= TUP_TOL)
+        .sort((a, b) => b.n - a.n);
 
     for (const def of candidates) {
         if (gi + def.n > groups.length) continue;
         let ok = true;
         for (let j = 1; j < def.n; j++) {
-            if (Math.abs(groups[gi+j].dur - def.t) > TOL) { ok = false; break; }
+            if (Math.abs(groups[gi + j].dur - def.t) > TUP_TOL) { ok = false; break; }
         }
         if (!ok) continue;
         const lg   = groups[gi + def.n - 1];
@@ -144,10 +182,10 @@ function tryDetectTuplet(groups, gi) {
     return null;
 }
 
-// ── Pass 1: 小節データ構築 ─────────────────────────────────────────
+// ── 小節データ構築 ────────────────────────────────────────────────
 function buildBarData(barStart, barEnd, allEvents) {
     const barEvents = allEvents.filter(e => e.st >= barStart && e.st < barEnd);
-    const groups    = groupByTick(barEvents);
+    const groups    = groupByTickIOI(barEvents, barEnd);
 
     const timeline = [];
     let gi = 0;
@@ -161,11 +199,9 @@ function buildBarData(barStart, barEnd, allEvents) {
             const g = groups[gi];
             const fitsInBar = (g.tick + g.dur) <= barEnd;
             if (fitsInBar) {
-                // 完全にバー内 → 元 dur でスナップ（付点もそのまま）
                 const snp = snapStd(g.dur);
                 timeline.push({ type:"note", tick:g.tick, vexDur:snp.v, adv:snp.t, grp:g });
             } else {
-                // バーまたぎ → 利用可能長にキャップ（小節線整合優先）
                 const avail = barEnd - g.tick;
                 const snp   = snapStd(avail);
                 timeline.push({ type:"note", tick:g.tick, vexDur:snp.v,
@@ -186,14 +222,12 @@ function buildBarData(barStart, barEnd, allEvents) {
             makeRests(gap).forEach(r => tickables.push(r));
             cursor += gap;
         }
-
         if (item.type === "note") {
             const note = makeNote(item.grp.pitches, item.vexDur);
             tickables.push(note);
             if (["8","8d","16","16d","32","32d"].includes(item.vexDur))
                 beamCandidates.push(note);
             cursor = item.tick + item.adv;
-
         } else {
             const tnotes = item.grps.map(grp => {
                 const n = makeNote(grp.pitches, item.def.vex);
@@ -221,61 +255,44 @@ function buildBarData(barStart, barEnd, allEvents) {
     return { tickables, beamCandidates, tupletObjs };
 }
 
-// ── 小節幅計算
-//   音符種別ごとの基本幅 + 臨時記号スペース + 付点スペース
-//   ※ formatToStave が stave.getNoteEndX()-getNoteStartX() を使うので、
-//      ここで返すのは「音符エリア」の自然幅のみ。
-//      クレフ・拍子記号のスペースは呼び出し側で別途加算する。
-// ─────────────────────────────────────────────────────────────────
-function calcNoteAreaWidth(tickables) {
+// ── SVG 仮想幅の計算 ─────────────────────────────────────────────
+function calcNoteVirtualW(tickables) {
     let w = 0;
     for (const t of tickables) {
         try {
             if (t.isRest()) {
                 w += 24;
             } else {
-                const dur  = t.getDuration();          // "w","h","q","8","16","32"
+                const dur    = t.getDuration();
                 const hasDot = t.dots > 0;
-                const keys = t.getKeys();
-                const accs = keys.filter(k => k.includes("#") || k.includes("b")).length;
-                const base = NOTE_W[dur] || 26;
-                w += base
-                   + (hasDot ? 14 : 0)
-                   + Math.max(0, keys.length - 1) * 8
-                   + accs * 18;                        // 臨時記号は横幅を多く取る
+                const keys   = t.getKeys();
+                const accs   = keys.filter(k => k.includes("#") || k.includes("b")).length;
+                w += (NOTE_W_MAP[dur] || 26) + (hasDot ? 14 : 0)
+                   + Math.max(0, keys.length - 1) * 8 + accs * 18;
             }
         } catch(_) { w += 26; }
     }
-    return Math.max(w, 55);
+    return Math.max(w, 60);
 }
 
 // ── メイン描画 ─────────────────────────────────────────────────────
-//
-// [formatToStave について]
-//  Formatter.format(voices, width) は width を外から渡す。
-//  しかし stave にはクレフ・拍子記号のスペースがあり、
-//  実際に音符が描画できるエリアは stave.getNoteEndX() - stave.getNoteStartX()。
-//  format() に stave 幅そのままを渡すと音符がはみ出す。
-//
-//  formatToStave(voices, stave) は内部で
-//    stave.getNoteEndX() - stave.getNoteStartX()
-//  を自動計算して format() に渡す。
-//  つまり「クレフ・拍子記号の幅を除いた正確な音符エリア」を使うため
-//  音符間隔が正しくなる。
-// ─────────────────────────────────────────────────────────────────
 function draw() {
     try {
         if (!container) return;
         container.innerHTML = "";
 
-        const TPBAR = timeSig.num * TPBEAT;
+        const TPBAR    = timeSig.num * TPBEAT;
+        const barStart = currentBar * TPBAR;
+        const barEnd   = barStart + TPBAR;
 
+        // 全体の小節数
         let numBars = 1;
         if (clipNotes.length > 0) {
             const maxEnd = clipNotes.reduce((mx, n) =>
                 Math.max(mx, Math.round((n.start_time + n.duration) * TPBEAT)), 0);
             numBars = Math.ceil(maxEnd / TPBAR);
         }
+        if (currentBar >= numBars) currentBar = Math.max(0, numBars - 1);
 
         const allEvents = clipNotes.map(n => ({
             st:    Math.round(n.start_time * TPBEAT),
@@ -283,121 +300,73 @@ function draw() {
             pitch: n.pitch
         }));
 
-        // Pass 1: 全小節データ構築
-        const allBarData = [];
-        for (let bar = 0; bar < numBars; bar++) {
-            allBarData.push(buildBarData(bar * TPBAR, (bar + 1) * TPBAR, allEvents));
+        // 現在の小節のデータ
+        const d = buildBarData(barStart, barEnd, allEvents);
+
+        // 仮想幅（音符密度に応じて拡張）
+        const noteW    = calcNoteVirtualW(d.tickables);
+        const W_virtual = Math.max(MIN_W, noteW + CLEF_W);
+
+        // SVG 初期化（仮想サイズで描画）
+        const renderer = new Renderer(container, Renderer.Backends.SVG);
+        renderer.resize(W_virtual, H_VIRTUAL);
+        const ctx = renderer.getContext();
+
+        // デフォルト色（黒）をそのまま使用 — 白背景に黒音符で確実に表示
+
+        // 五線譜描画
+        const staveX = 10;
+        const staveY = 30;
+        const staveW = W_virtual - staveX * 2;
+        const stave  = new Stave(staveX, staveY, staveW);
+        stave.addClef("treble").addTimeSignature(timeSig.num + "/" + timeSig.den);
+        stave.setEndBarType(Barline.type.END);
+        stave.setContext(ctx).draw();
+
+        // Voice & Format
+        const v = new Voice({ num_beats: timeSig.num, beat_value: timeSig.den });
+        v.setStrict(false);
+        v.addTickables(d.tickables);
+
+        // Beam は v.draw() 前に生成（個別フラグ抑制）
+        let beams = [];
+        try { beams = Beam.generateBeams(d.beamCandidates); } catch(e) {}
+
+        // formatToStave: クレフ・拍子記号を除いた正確な音符幅を自動計算
+        try {
+            new Formatter()
+                .joinVoices([v])
+                .formatToStave([v], stave, { align_rests: true });
+        } catch(e) {
+            maxLog("formatToStave fallback: " + e.message);
+            new Formatter().joinVoices([v]).format([v], staveW - CLEF_W - 15);
         }
 
-        // Pass 2: 小節幅計算
-        //  staveWidth = noteAreaWidth + (クレフ・拍子記号等の非音符幅)
-        //
-        //  VexFlow stave 内訳 (実測近似値):
-        //    ト音記号 + 拍子記号: ~90px  → 1小節目
-        //    ト音記号のみ:        ~50px  → 各段の先頭 (2段目以降)
-        //    なし:                ~18px  → それ以外
-        const CLEF_TIMESIG_W = 90;  // 最初の小節
-        const CLEF_ONLY_W    = 50;  // 各段先頭（2段目以降）
-        const NO_CLEF_W      = 18;  // 通常小節
+        v.draw(ctx, stave);
+        beams.forEach(b => b.setContext(ctx).draw());
+        d.tupletObjs.forEach(t => t.setContext(ctx).draw());
 
-        const noteAreaWidths = allBarData.map(d => calcNoteAreaWidth(d.tickables));
+        // 小節番号（左上）
+        ctx.save();
+        ctx.setFillStyle("#888888");
+        ctx.fillText(`bar ${currentBar + 1} / ${numBars}`, staveX + 2, 14);
+        ctx.restore();
 
-        // stave 幅 (初回計算時は各段先頭かどうか不明なので仮置き、段組み後に最終確定)
-        // → 段組み後に再計算するため、ここでは仮幅を計算
-        const approxWidths = noteAreaWidths.map((nw, i) =>
-            nw + (i === 0 ? CLEF_TIMESIG_W : NO_CLEF_W));
+        // デバッグ表示更新
+        const dbg = document.getElementById("dbg");
+        if (dbg) dbg.textContent = `bar ${currentBar+1}/${numBars} notes:${clipNotes.length}`;
 
-        // Pass 3: 段組み
-        const ROW_WIDTH = Math.max((window.innerWidth || 900) - 24, 300);
-
-        const rows = [];
-        let curRow = [], curW = 0;
-        approxWidths.forEach((w, i) => {
-            if (curRow.length > 0 && curW + w > ROW_WIDTH) {
-                rows.push(curRow);
-                curRow = [];
-                curW   = 0;
-            }
-            curRow.push(i);
-            curW += w;
-        });
-        if (curRow.length > 0) rows.push(curRow);
-
-        // Pass 4: 各段の小節幅を確定
-        //  段の先頭小節のスペースを CLEF_ONLY_W で更新 (2段目以降)
-        const finalWidths = approxWidths.slice();
-        rows.forEach((row, ri) => {
-            if (ri === 0) return;                         // 1段目はすでに CLEF_TIMESIG_W
-            const firstBarIdx = row[0];
-            finalWidths[firstBarIdx] = noteAreaWidths[firstBarIdx] + CLEF_ONLY_W;
-        });
-
-        // SVG サイズ
-        const svgWidth  = ROW_WIDTH + 10;
-        const svgHeight = rows.length * ROW_H + 10;
-
-        // Pass 5: SVG 初期化
-        const renderer = new Renderer(container, Renderer.Backends.SVG);
-        renderer.resize(svgWidth, svgHeight);
-        const ctx = renderer.getContext();
-        ctx.setFont("Arial", 10, "");
-
-        // Pass 6: 段ごとに描画
-        rows.forEach((row, rowIdx) => {
-            const staveTopY = rowIdx * ROW_H + STAVE_Y;
-            let x = 10;
-
-            row.forEach(bar => {
-                const d = allBarData[bar];
-                const w = finalWidths[bar];
-
-                const isFirst    = bar === 0;
-                const isFirstRow = x === 10;
-                const isLast     = bar === numBars - 1;
-
-                // ── Stave 構築 ──
-                const stave = new Stave(x, staveTopY, w);
-                if (isFirst) {
-                    stave.addClef("treble")
-                         .addTimeSignature(timeSig.num + "/" + timeSig.den);
-                } else if (isFirstRow) {
-                    stave.addClef("treble");   // 2段目以降の先頭はクレフのみ
-                }
-                if (isLast) stave.setEndBarType(Barline.type.END);
-                stave.setContext(ctx).draw();
-
-                // ── Voice 構築 ──
-                const v = new Voice({ num_beats: timeSig.num, beat_value: timeSig.den });
-                v.setStrict(false);
-                v.addTickables(d.tickables);
-
-                // ── Beam 生成 (v.draw() 前に行うことでフラグ重複を防ぐ) ──
-                let beams = [];
-                try { beams = Beam.generateBeams(d.beamCandidates); }
-                catch(e) { maxLog("Beam: " + e.message); }
-
-                // ── formatToStave で正確なノート間隔 ──
-                //   stave.getNoteEndX() - stave.getNoteStartX() を自動計算
-                //   → クレフ・拍子記号の幅を除いた実際の音符エリアに合わせる
-                try {
-                    new Formatter()
-                        .joinVoices([v])
-                        .formatToStave([v], stave, { align_rests: true });
-                } catch(e) {
-                    // フォールバック: format() で幅を手動指定
-                    maxLog("formatToStave fallback: " + e.message);
-                    new Formatter()
-                        .joinVoices([v])
-                        .format([v], Math.max(w - stave.getNoteStartX() + x - 15, 50));
-                }
-
-                v.draw(ctx, stave);
-                beams.forEach(b => b.setContext(ctx).draw());
-                d.tupletObjs.forEach(t => t.setContext(ctx).draw());
-
-                x += w;
-            });
-        });
+        // ── SVG viewBox による自動スケーリング ──────────────────
+        //   W_virtual × H_VIRTUAL を仮想解像度として描画し、
+        //   viewBox + preserveAspectRatio で M4L 169px に自動フィット。
+        //   音数が多くて仮想幅が広くても絶対に見切れない。
+        const svgEl = container.querySelector("svg");
+        if (svgEl) {
+            svgEl.setAttribute("viewBox",              `0 0 ${W_virtual} ${H_VIRTUAL}`);
+            svgEl.setAttribute("width",                "100%");
+            svgEl.setAttribute("height",               "100%");
+            svgEl.setAttribute("preserveAspectRatio",  "xMidYMid meet");
+        }
 
     } catch(e) {
         maxLog("### Render Error: " + e.message);
@@ -405,20 +374,50 @@ function draw() {
 }
 
 // ── Max メッセージ受信 ────────────────────────────────────────────
-if (window.max) {
-    window.max.bindInlet('clip_data', function(jsonStr) {
+// window.max は jweb ロード後しばらくして注入される場合があるため
+// ポーリングで確実にバインドする
+let _maxBound = false;
+
+function setupMaxBindings() {
+    if (_maxBound) return;
+    if (!window.max) return;         // まだ準備できていない
+    _maxBound = true;
+
+    const dbg = document.getElementById("dbg");
+    if (dbg) dbg.textContent = "max ready";
+
+    // クリップの全ノートデータ（JSON 文字列）
+    window.max.bindInlet("clip_data", function(jsonStr) {
         try {
             const data = JSON.parse(jsonStr);
             if (data && data.notes) { clipNotes = data.notes; draw(); }
-        } catch(e) { maxLog("JSON: " + e.message); }
+        } catch(e) { maxLog("JSON parse: " + e.message); }
     });
-    window.max.bindInlet('reset',   ()    => { clipNotes = []; draw(); });
-    window.max.bindInlet('note_in', (p,v) => {
-        v > 0 ? currentLiveNotes.add(p) : currentLiveNotes.delete(p);
+
+    // 表示小節（0始まり）— Phase 2 の ◀▶ ボタン用
+    window.max.bindInlet("bar_index", function(n) {
+        currentBar = Math.max(0, Math.floor(n));
         draw();
     });
-    window.max.bindInlet('timesig', (n,d) => { timeSig.num = n; timeSig.den = d; draw(); });
-    window.max.bindInlet('tempo',   ()    => { draw(); });
+
+    // 拍子記号
+    window.max.bindInlet("timesig", function(n, d) {
+        timeSig.num = n; timeSig.den = d; draw();
+    });
+
+    // リセット
+    window.max.bindInlet("reset", function() {
+        clipNotes = []; currentBar = 0; draw();
+    });
 }
 
+// 初回チェック → 50ms ごとに最大 5 秒間ポーリング
+setupMaxBindings();
+const _pollTimer = setInterval(function() {
+    if (_maxBound) { clearInterval(_pollTimer); return; }
+    setupMaxBindings();
+}, 50);
+setTimeout(function() { clearInterval(_pollTimer); }, 5000);
+
+// 初期描画（空の五線を表示）
 draw();

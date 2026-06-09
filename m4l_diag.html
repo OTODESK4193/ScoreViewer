@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<script src="vexflow.js"></script>
+<style>
+  body { margin: 0; padding: 4px; font-family: monospace; font-size: 11px; background: #f8f8f8; }
+  .ok  { color: #080; font-weight: bold; }
+  .err { color: #c00; font-weight: bold; }
+  .inf { color: #00c; }
+  #vf  { margin-top: 4px; }
+</style>
+</head>
+<body>
+
+<div id="log">Checking...</div>
+<div id="vf"></div>
+
+<script>
+var log = document.getElementById('log');
+
+function addLine(cls, text) {
+    var d = document.createElement('div');
+    d.className = cls;
+    d.textContent = text;
+    log.appendChild(d);
+}
+
+// ① HTMLロード確認
+log.innerHTML = '';
+addLine('ok', '① HTML: loaded OK');
+
+// ② VexFlow確認
+if (typeof VexFlow === 'undefined') {
+    addLine('err', '② VexFlow: NOT LOADED (vexflow.js が読めていない)');
+} else {
+    var ver = (VexFlow.BUILD && VexFlow.BUILD.VERSION) || '?';
+    addLine('ok', '② VexFlow: ' + ver + ' loaded');
+
+    // ③ 基本描画テスト
+    try {
+        var VF = VexFlow;
+        var div = document.getElementById('vf');
+        var renderer = new VF.Renderer(div, VF.Renderer.Backends.SVG);
+        renderer.resize(360, 100);
+        var ctx = renderer.getContext();
+        var stave = new VF.Stave(5, 10, 340);
+        stave.addClef('treble').addTimeSignature('4/4');
+        stave.setContext(ctx).draw();
+
+        var rest = new VF.StaveNote({ keys: ['b/4'], duration: 'wr' });
+        var v = new VF.Voice({ num_beats: 4, beat_value: 4 });
+        v.setStrict(false);
+        v.addTickables([rest]);
+        new VF.Formatter().joinVoices([v]).formatToStave([v], stave, { align_rests: true });
+        v.draw(ctx, stave);
+
+        addLine('ok', '③ VexFlow render: OK (下に五線が見えれば完全動作)');
+    } catch(e) {
+        addLine('err', '③ VexFlow render ERROR: ' + e.message);
+    }
+}
+
+// ④ window.max確認
+function checkMax(attempt) {
+    if (attempt > 40) {
+        addLine('err', '④ window.max: 2秒待っても見つからない (bindInlet不可)');
+        return;
+    }
+    if (window.max && window.max.bindInlet) {
+        addLine('ok', '④ window.max: OK (attempt=' + attempt + ')');
+    } else {
+        setTimeout(function(){ checkMax(attempt + 1); }, 50);
+    }
+}
+checkMax(0);
+</script>
+</body>
+</html>

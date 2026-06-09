@@ -2,23 +2,41 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <title>M4L Score Viewer Pro</title>
+    <title>M4L Score Viewer</title>
     <script src="vexflow.js"></script>
     <style>
-        /* M4L エフェクトエリア: 高さ 169px 固定対応 */
         * { box-sizing: border-box; margin: 0; padding: 0; }
         html, body {
-            width: 100%;
+            width:  100%;
             height: 100%;
-            background: #FFFFFF;
-            overflow-x: hidden;
-            overflow-y: auto;   /* 複数段は縦スクロール */
+            background: #ffffff;
+            overflow: hidden;
         }
-        #score-container { width: 100%; }
+        #score-container {
+            width:  100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        #score-container svg {
+            display: block;
+            width:  100% !important;
+            height: 100% !important;
+        }
+        #dbg {
+            position: fixed;
+            top: 2px; left: 4px;
+            font-size: 10px;
+            color: #888;
+            font-family: monospace;
+            pointer-events: none;
+        }
     </style>
 </head>
 <body>
     <div id="score-container"></div>
+    <div id="dbg">loading...</div>
 <script src="m4l_score.js"></script>
 </body>
 </html>
