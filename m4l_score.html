@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>M4L Score Viewer Pro</title>
+    <script src="vexflow.js"></script>
+    <style>
+        /* M4L エフェクトエリア: 高さ 169px 固定対応 */
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html, body {
+            width: 100%;
+            height: 100%;
+            background: #FFFFFF;
+            overflow-x: hidden;
+            overflow-y: auto;   /* 複数段は縦スクロール */
+        }
+        #score-container { width: 100%; }
+    </style>
+</head>
+<body>
+    <div id="score-container"></div>
+<script src="m4l_score.js"></script>
+</body>
+</html>
