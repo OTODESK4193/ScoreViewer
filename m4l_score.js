@@ -1,5 +1,5 @@
 // ================================================================
-// m4l_score.js  v9  Phase 2 (key signature + naturals)
+// m4l_score.js  v10  Phase 3 (variable time signatures)
 // ================================================================
 
 window.onerror = function(msg, src, line) {
@@ -14,7 +14,8 @@ const { Renderer, Stave, StaveNote, Voice, Formatter,
 const container = document.getElementById("score-container");
 
 let clipNotes  = [];
-let timeSig    = { num: 4, den: 4 };
+let timeSig    = { num: 4, den: 4 };   // fallback meter (single observer value)
+let barMeters  = [];                   // [{num,den}, ...] per bar (from scan); empty = use timeSig
 let currentBar = 0;
 
 // --- key signature state (Phase 2) ---
@@ -51,15 +52,16 @@ function applyKeyIndex(i) {
     if (k.ovr) for (var pc in k.ovr) spellTable[pc] = k.ovr[pc];
 }
 
-const TPBEAT    = 480;
+const TPBEAT    = 480;       // ticks per quarter note
+const TPWHOLE   = 1920;      // ticks per whole note
 const TOL       = 12;
 const TUP_TOL   = 35;
 const GRID      = 4;
 const IOI_RATIO = 0.50;
 const H_VIRTUAL = 160;
-const K_NOTE    = 58;
 const MIN_W     = 420;
 const CLEF_W    = 98;
+const SIG_W     = 30;        // extra width when a time signature is drawn mid-score
 
 const STD_NOTES = [
     {t:1920,v:"w"}, {t:1440,v:"hd"},{t:960,v:"h"}, {t:720,v:"qd"},
@@ -92,6 +94,11 @@ function midiToKey(midi) {
     if (pc === 11 && letter === "c") oct += 1;
     if (pc === 0  && letter === "b") oct -= 1;
     return name + "/" + oct;
+}
+
+// ticks in one bar of meter m (denominator-aware: 7/8 -> 7*240 = 1680)
+function barTicksOf(m) {
+    return Math.round(m.num * TPWHOLE / m.den);
 }
 
 function snapStd(ticks) {
@@ -274,36 +281,53 @@ function calcNoteVirtualW(tickables) {
     return Math.max(w, 60);
 }
 
-function calcBarsToShow(numBars, allEvents, TPBAR) {
-    if (numBars <= 1) return 1;
-    var bar0 = allEvents.filter(function(e){ return e.st >= 0 && e.st < TPBAR; });
-    var posSet = {};
-    bar0.forEach(function(e){ posSet[Math.round(e.st / GRID) * GRID] = true; });
-    var pos = Object.keys(posSet).length || 1;
-    if (pos <= 8)  return Math.min(4, numBars);
-    if (pos <= 16) return Math.min(2, numBars);
-    return 1;
+// build the full list of bars covering all notes.
+// each bar: {start, len, num, den, chg}  (chg = meter differs from previous bar)
+function buildBars() {
+    var maxEnd = 0;
+    for (var i = 0; i < clipNotes.length; i++) {
+        var end = Math.round((clipNotes[i].start_time + clipNotes[i].duration) * TPBEAT);
+        if (end > maxEnd) maxEnd = end;
+    }
+    var bars = [], acc = 0, prev = null;
+    function push(m) {
+        var L = barTicksOf(m);
+        if (L < 1) L = barTicksOf(timeSig);
+        var chg = !prev || prev.num !== m.num || prev.den !== m.den;
+        bars.push({ start: acc, len: L, num: m.num, den: m.den, chg: chg });
+        acc += L; prev = m;
+    }
+    if (barMeters && barMeters.length) {
+        for (var b = 0; b < barMeters.length; b++) push(barMeters[b]);
+        var last = barMeters[barMeters.length - 1];
+        while (acc < maxEnd) push(last);            // pad if notes exceed captured meters
+    } else {
+        do { push(timeSig); } while (acc < maxEnd);
+    }
+    if (bars.length === 0) push(timeSig);
+    return bars;
 }
 
-function getNumBars() {
-    var TPBAR = timeSig.num * TPBEAT;
-    if (clipNotes.length === 0) return 1;
-    var maxEnd = clipNotes.reduce(function(mx, n){
-        return Math.max(mx, Math.round((n.start_time + n.duration) * TPBEAT));
-    }, 0);
-    return Math.max(1, Math.ceil(maxEnd / TPBAR));
+function countPosInRange(allEvents, s, e) {
+    var set = {};
+    allEvents.forEach(function(ev){ if (ev.st >= s && ev.st < e) set[Math.round(ev.st / GRID) * GRID] = 1; });
+    return Object.keys(set).length;
 }
+
+function calcBarsToShow(bars, startIdx, allEvents) {
+    if (bars.length <= 1) return 1;
+    var b = bars[startIdx];
+    var pos = countPosInRange(allEvents, b.start, b.start + b.len) || 1;
+    var max = pos <= 8 ? 4 : (pos <= 16 ? 2 : 1);
+    return Math.min(max, bars.length - startIdx);
+}
+
+function getNumBars() { return buildBars().length; }
 
 function draw() {
     try {
         if (!container) return;
         container.innerHTML = "";
-
-        var TPBAR = timeSig.num * TPBEAT;
-        var numBars = getNumBars();
-        if (currentBar >= numBars) currentBar = Math.max(0, numBars - 1);
-
-        var clefW = CLEF_W + (KEYSIG_COUNT[keySpec] || 0) * 12;
 
         var allEvents = clipNotes.map(function(n){
             return {
@@ -313,29 +337,44 @@ function draw() {
             };
         });
 
-        var barsToShow = calcBarsToShow(numBars, allEvents, TPBAR);
+        var bars    = buildBars();
+        var numBars = bars.length;
+        if (currentBar >= numBars) currentBar = Math.max(0, numBars - 1);
+
         var startBar   = currentBar;
+        var barsToShow = calcBarsToShow(bars, startBar, allEvents);
         var endBar     = Math.min(startBar + barsToShow - 1, numBars - 1);
         var actual     = endBar - startBar + 1;
 
-        var barDatas = [];
+        var keyAccW = (KEYSIG_COUNT[keySpec] || 0) * 12;
+
+        // per shown bar: bar data, note width, and reserved head width (clef/key/sig)
+        var barDatas = [], noteWidths = [], headWs = [], showSigs = [];
         for (var b = 0; b < actual; b++) {
-            var bs = (startBar + b) * TPBAR;
-            barDatas.push(buildBarData(bs, bs + TPBAR, allEvents));
+            var bar = bars[startBar + b];
+            barDatas.push(buildBarData(bar.start, bar.start + bar.len, allEvents));
+            noteWidths.push(calcNoteVirtualW(barDatas[b].tickables));
+            // show meter on the first displayed bar, or wherever it changes
+            var showSig = (b === 0) || bar.chg;
+            showSigs.push(showSig);
+            var head = 0;
+            if (b === 0) head += CLEF_W + keyAccW;   // clef + key signature
+            if (showSig) head += SIG_W;
+            headWs.push(head);
         }
 
-        var noteWidths = barDatas.map(function(bd){ return calcNoteVirtualW(bd.tickables); });
         var totalNoteW = noteWidths.reduce(function(s,w){ return s+w; }, 0);
-        var W_virtual  = Math.max(MIN_W, totalNoteW + clefW + 20);
+        var totalHeadW = headWs.reduce(function(s,w){ return s+w; }, 0);
+        var W_virtual  = Math.max(MIN_W, totalNoteW + totalHeadW + 20);
 
         var renderer = new Renderer(container, Renderer.Backends.SVG);
         renderer.resize(W_virtual, H_VIRTUAL);
         var ctx = renderer.getContext();
 
         var totalStaveW = W_virtual - 20;
-        var denomW      = totalNoteW + clefW;
+        var denomW      = totalNoteW + totalHeadW;
         var staveWidths = noteWidths.map(function(nw, b){
-            return Math.floor(totalStaveW * (b === 0 ? nw + clefW : nw) / denomW);
+            return Math.floor(totalStaveW * (nw + headWs[b]) / denomW);
         });
         var sw_sum = staveWidths.reduce(function(s,w){ return s+w; }, 0);
         staveWidths[actual - 1] += totalStaveW - sw_sum;
@@ -343,19 +382,21 @@ function draw() {
         var staveY = 30;
         var curX = 10;
         for (var b = 0; b < actual; b++) {
-            var bd = barDatas[b];
-            var sw = staveWidths[b];
+            var bar = bars[startBar + b];
+            var bd  = barDatas[b];
+            var sw  = staveWidths[b];
             var stave = new Stave(curX, staveY, sw);
 
             if (b === 0) {
-                stave.addClef("treble")
-                     .addKeySignature(keySpec)
-                     .addTimeSignature(timeSig.num + "/" + timeSig.den);
+                stave.addClef("treble").addKeySignature(keySpec);
+            }
+            if (showSigs[b]) {
+                stave.addTimeSignature(bar.num + "/" + bar.den);
             }
             stave.setEndBarType(b < actual - 1 ? Barline.type.NONE : Barline.type.END);
             stave.setContext(ctx).draw();
 
-            var v = new Voice({ num_beats: timeSig.num, beat_value: timeSig.den });
+            var v = new Voice({ num_beats: bar.num, beat_value: bar.den });
             v.setStrict(false);
             v.addTickables(bd.tickables);
 
@@ -371,7 +412,7 @@ function draw() {
                     .formatToStave([v], stave, { align_rests: true });
             } catch(e) {
                 maxLog("formatToStave b" + b + ": " + e.message);
-                var fw = sw - (b === 0 ? clefW + 15 : 15);
+                var fw = sw - headWs[b] - 15;
                 new Formatter().joinVoices([v]).format([v], Math.max(fw, 30));
             }
 
@@ -391,7 +432,8 @@ function draw() {
         ctx.restore();
 
         var dbg = document.getElementById("dbg");
-        if (dbg) dbg.textContent = barLabel + " notes:" + clipNotes.length;
+        if (dbg) dbg.textContent = barLabel + " notes:" + clipNotes.length
+                                 + (barMeters.length ? " meters:" + barMeters.length : "");
 
         var svgEl = container.querySelector("svg");
         if (svgEl) {
@@ -404,6 +446,17 @@ function draw() {
     } catch(e) {
         maxLog("### Render Error: " + e.message);
     }
+}
+
+// parse a flat list of meter numbers into barMeters.
+// accepts pairs: num den num den ...  (e.g. 4 4 7 8 5 8)
+function setMetersFromList(args) {
+    var m = [];
+    for (var i = 0; i + 1 < args.length; i += 2) {
+        var n = Math.round(args[i]), d = Math.round(args[i+1]);
+        if (n > 0 && d > 0) m.push({ num: n, den: d });
+    }
+    barMeters = m;
 }
 
 var _maxBound = false;
@@ -442,12 +495,25 @@ function setupMaxBindings() {
         timeSig.num = n; timeSig.den = d; draw();
     });
 
+    // variable meter list from the scanner: "meters 4 4 7 8 5 8"
+    window.max.bindInlet("meters", function() {
+        var args = Array.prototype.slice.call(arguments);
+        setMetersFromList(args);
+        currentBar = 0;
+        draw();
+    });
+
+    // clear captured meters, fall back to single timesig
+    window.max.bindInlet("meters_clear", function() {
+        barMeters = []; draw();
+    });
+
     window.max.bindInlet("key", function(idx) {
         applyKeyIndex(idx); draw();
     });
 
     window.max.bindInlet("reset", function() {
-        clipNotes = []; currentBar = 0; draw();
+        clipNotes = []; currentBar = 0; barMeters = []; draw();
     });
 }
 
