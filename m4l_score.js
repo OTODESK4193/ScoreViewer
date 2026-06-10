@@ -1,5 +1,5 @@
 // ================================================================
-// m4l_score.js  v13  Phase 6 (beat-grouped beams, rest clef, exact width)
+// m4l_score.js  v14  Phase 6 (beat-grouped beams, rest clef, exact width)
 // ================================================================
 
 window.onerror = function(msg, src, line) {
@@ -414,7 +414,6 @@ function draw() {
         for (var b = 0; b < actual; b++) {
             var bar = bars[startBar + b];
             var sw  = staveWidths[b];
-            var fw  = Math.max(sw - headWs[b] - 12, 30);   // note area, leaves margin before barline
 
             var tStave = new Stave(curX, trebleY, sw);
             if (b === 0) tStave.addClef(grand ? "treble" : clef1).addKeySignature(keySpec);
@@ -434,6 +433,9 @@ function draw() {
                     try { new StaveConnector(tStave, bStave).setType(StaveConnector.type.SINGLE_LEFT).setContext(ctx).draw(); } catch(e){}
                 }
             }
+
+            // exact note area from the drawn stave (accounts for clef/key/sig + end barline)
+            var fw = Math.max(tStave.getNoteEndX() - tStave.getNoteStartX() - 8, 30);
 
             if (grand) {
                 var tv = TV[b], bv = BV[b];
