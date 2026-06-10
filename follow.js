@@ -1,19 +1,14 @@
 // ================================================================
 // follow.js  —  Max [js follow.js] object   (Phase 4: playback follow)
-// Follows arrangement playback on THIS device's own track and shows
-// the bar currently under the playhead, auto-advancing bar by bar.
+// RESTORED single-bar version (the one that worked).
+// Shows the bar currently under the playhead on THIS device's track,
+// auto-advancing bar by bar. Driven by an external [metro] while a
+// "Follow" toggle is on. Output -> jweb inlet 0.
 //
-// Drive it with a [metro 50] -> [js follow.js] while a "Follow" toggle
-// is on. Output goes to the jweb inlet 0 (same as clip_data / meters):
-//     meters <num> <den>
-//     clip_data { "notes":[ {start_time,duration,pitch}, ... ] }
-// The notes are for the current bar only, with start_time relative to
-// the bar start (in beats). The jweb then renders that single bar.
-//
-// Meters are read passively from the song's signature at the playhead
-// (no transport movement), so this does NOT disturb playback. Bar
-// boundaries are accumulated forward from the clip start, so it is most
-// accurate when you play through a clip from (at or before) its start.
+// Wiring:  [live.toggle] -> [metro 50] -> [js follow.js] -> [jweb]
+//          (also: [live.toggle] -> [js follow.js]  to set on/off)
+// Meters are read passively from the playhead (no transport movement).
+// Most accurate when playing through a clip from (at or before) its start.
 // ================================================================
 
 autowatch = 1;
@@ -25,13 +20,13 @@ var song       = null;
 var track      = null;
 
 var lastClipId = -1;
-var clipStart  = 0;       // clip arrangement position (beats)
-var clipLen    = 0;       // clip length (beats)
-var notes      = [];      // cached clip notes: {st,dur,pitch} (beats, clip-relative)
+var clipStart  = 0;
+var clipLen    = 0;
+var notes      = [];
 
-var barStartRel = 0;      // current bar start, clip-relative (beats)
+var barStartRel = 0;
 var curMeter    = { n: 4, d: 4 };
-var lastKey     = "";     // de-dupe emits
+var lastKey     = "";
 
 function num(v) { return parseFloat("" + v); }
 function barBeats(m) { var b = m.n * 4 / m.d; return b > 0 ? b : 4; }
@@ -47,7 +42,7 @@ function getOwnTrack() {
 }
 
 function clipIdsOfTrack(tr) {
-    var raw = tr.get("arrangement_clips");   // ["id", n, "id", m, ...]
+    var raw = tr.get("arrangement_clips");
     var ids = [];
     for (var i = 0; i < raw.length; i++) {
         if (raw[i] == "id" && i + 1 < raw.length) ids.push(parseInt(raw[i+1], 10));
@@ -94,30 +89,28 @@ function poll() {
 
     var t = num(song.get("current_song_time"));
 
-    // find the clip under the playhead on our own track
     var ids = clipIdsOfTrack(track);
-    var foundId = -1, fStart = 0, fLen = 0;
+    var foundId = -1;
     for (var i = 0; i < ids.length; i++) {
         var c = new LiveAPI("id " + ids[i]);
         var s = num(c.get("start_time"));
         var l = num(c.get("length"));
         if (!isNaN(s) && !isNaN(l) && t >= s - 1e-6 && t < s + l - 1e-6) {
-            foundId = ids[i]; fStart = s; fLen = l; break;
+            foundId = ids[i]; break;
         }
     }
-    if (foundId < 0) { return; }            // playhead not over a clip on this track
+    if (foundId < 0) { return; }
 
     if (foundId !== lastClipId) loadClip(foundId);
 
     var clipRelT = t - clipStart;
-    if (clipRelT < barStartRel - 1e-6) {    // jumped backwards within clip -> reset
+    if (clipRelT < barStartRel - 1e-6) {
         barStartRel = 0; curMeter = readMeter();
     }
-    // advance bar boundaries forward to contain the playhead
     var guard = 0;
     while (clipRelT >= barStartRel + barBeats(curMeter) - 1e-6 && guard < 4096) {
         barStartRel += barBeats(curMeter);
-        curMeter = readMeter();             // we are now inside the new bar
+        curMeter = readMeter();
         guard++;
     }
 
@@ -127,7 +120,7 @@ function poll() {
 function emitBar() {
     var s = barStartRel, e = barStartRel + barBeats(curMeter);
     var key = lastClipId + ":" + s.toFixed(3) + ":" + curMeter.n + "/" + curMeter.d;
-    if (key === lastKey) return;            // same bar, nothing changed
+    if (key === lastKey) return;
     lastKey = key;
 
     var out = [];
