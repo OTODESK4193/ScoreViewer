@@ -1,5 +1,5 @@
 // ================================================================
-// m4l_score.js  v8  Phase 1+
+// m4l_score.js  v9  Phase 2 (key signature + naturals)
 // ================================================================
 
 window.onerror = function(msg, src, line) {
@@ -16,6 +16,40 @@ const container = document.getElementById("score-container");
 let clipNotes  = [];
 let timeSig    = { num: 4, den: 4 };
 let currentBar = 0;
+
+// --- key signature state (Phase 2) ---
+let keySpec    = "C";
+let spellTable = ["c","c#","d","d#","e","f","f#","g","g#","a","a#","b"];
+
+const SHARP_SP = ["c","c#","d","d#","e","f","f#","g","g#","a","a#","b"];
+const FLAT_SP  = ["c","db","d","eb","e","f","gb","g","ab","a","bb","b"];
+
+const KEY_TABLE = [
+    { name:"C major / A minor",   vf:"C",  base:SHARP_SP },
+    { name:"G major / E minor",   vf:"G",  base:SHARP_SP },
+    { name:"D major / B minor",   vf:"D",  base:SHARP_SP },
+    { name:"A major / F# minor",  vf:"A",  base:SHARP_SP },
+    { name:"E major / C# minor",  vf:"E",  base:SHARP_SP },
+    { name:"B major / G# minor",  vf:"B",  base:SHARP_SP },
+    { name:"F# major / D# minor", vf:"F#", base:SHARP_SP, ovr:{5:"e#"} },
+    { name:"F major / D minor",   vf:"F",  base:FLAT_SP },
+    { name:"Bb major / G minor",  vf:"Bb", base:FLAT_SP },
+    { name:"Eb major / C minor",  vf:"Eb", base:FLAT_SP },
+    { name:"Ab major / F minor",  vf:"Ab", base:FLAT_SP },
+    { name:"Db major / Bb minor", vf:"Db", base:FLAT_SP },
+    { name:"Gb major / Eb minor", vf:"Gb", base:FLAT_SP, ovr:{11:"cb"} }
+];
+
+const KEYSIG_COUNT = { C:0, G:1, D:2, A:3, E:4, B:5, "F#":6,
+                       F:1, Bb:2, Eb:3, Ab:4, Db:5, Gb:6 };
+
+function applyKeyIndex(i) {
+    i = Math.max(0, Math.min(KEY_TABLE.length - 1, Math.floor(i)));
+    var k = KEY_TABLE[i];
+    keySpec    = k.vf;
+    spellTable = k.base.slice();
+    if (k.ovr) for (var pc in k.ovr) spellTable[pc] = k.ovr[pc];
+}
 
 const TPBEAT    = 480;
 const TOL       = 12;
@@ -51,8 +85,13 @@ const TUPLETS = [
 const NOTE_W_MAP = { w:52, h:42, q:34, "8":28, "16":23, "32":19 };
 
 function midiToKey(midi) {
-    var n = ["c","c#","d","d#","e","f","f#","g","g#","a","a#","b"];
-    return n[midi % 12] + "/" + (Math.floor(midi / 12) - 1);
+    var pc     = ((midi % 12) + 12) % 12;
+    var name   = spellTable[pc];
+    var letter = name.charAt(0);
+    var oct    = Math.floor(midi / 12) - 1;
+    if (pc === 11 && letter === "c") oct += 1;
+    if (pc === 0  && letter === "b") oct -= 1;
+    return name + "/" + oct;
 }
 
 function snapStd(ticks) {
@@ -85,9 +124,6 @@ function makeNote(pitches, vexDur) {
     if (vexDur.includes("d") && !vexDur.endsWith("r")) {
         try { Dot.buildAndAttach([note]); } catch(e) {}
     }
-    keys.forEach(function(k, i) {
-        if (k.includes("#")) note.addModifier(new Accidental("#"), i);
-    });
     return note;
 }
 
@@ -267,6 +303,8 @@ function draw() {
         var numBars = getNumBars();
         if (currentBar >= numBars) currentBar = Math.max(0, numBars - 1);
 
+        var clefW = CLEF_W + (KEYSIG_COUNT[keySpec] || 0) * 12;
+
         var allEvents = clipNotes.map(function(n){
             return {
                 st:    Math.round(n.start_time * TPBEAT),
@@ -288,16 +326,16 @@ function draw() {
 
         var noteWidths = barDatas.map(function(bd){ return calcNoteVirtualW(bd.tickables); });
         var totalNoteW = noteWidths.reduce(function(s,w){ return s+w; }, 0);
-        var W_virtual  = Math.max(MIN_W, totalNoteW + CLEF_W + 20);
+        var W_virtual  = Math.max(MIN_W, totalNoteW + clefW + 20);
 
         var renderer = new Renderer(container, Renderer.Backends.SVG);
         renderer.resize(W_virtual, H_VIRTUAL);
         var ctx = renderer.getContext();
 
         var totalStaveW = W_virtual - 20;
-        var denomW      = totalNoteW + CLEF_W;
+        var denomW      = totalNoteW + clefW;
         var staveWidths = noteWidths.map(function(nw, b){
-            return Math.floor(totalStaveW * (b === 0 ? nw + CLEF_W : nw) / denomW);
+            return Math.floor(totalStaveW * (b === 0 ? nw + clefW : nw) / denomW);
         });
         var sw_sum = staveWidths.reduce(function(s,w){ return s+w; }, 0);
         staveWidths[actual - 1] += totalStaveW - sw_sum;
@@ -310,7 +348,9 @@ function draw() {
             var stave = new Stave(curX, staveY, sw);
 
             if (b === 0) {
-                stave.addClef("treble").addTimeSignature(timeSig.num + "/" + timeSig.den);
+                stave.addClef("treble")
+                     .addKeySignature(keySpec)
+                     .addTimeSignature(timeSig.num + "/" + timeSig.den);
             }
             stave.setEndBarType(b < actual - 1 ? Barline.type.NONE : Barline.type.END);
             stave.setContext(ctx).draw();
@@ -318,6 +358,9 @@ function draw() {
             var v = new Voice({ num_beats: timeSig.num, beat_value: timeSig.den });
             v.setStrict(false);
             v.addTickables(bd.tickables);
+
+            try { Accidental.applyAccidentals([v], keySpec); }
+            catch(e) { maxLog("applyAccidentals b" + b + ": " + e.message); }
 
             var beams = [];
             try { beams = Beam.generateBeams(bd.beamCandidates); } catch(e) {}
@@ -328,7 +371,7 @@ function draw() {
                     .formatToStave([v], stave, { align_rests: true });
             } catch(e) {
                 maxLog("formatToStave b" + b + ": " + e.message);
-                var fw = sw - (b === 0 ? CLEF_W + 15 : 15);
+                var fw = sw - (b === 0 ? clefW + 15 : 15);
                 new Formatter().joinVoices([v]).format([v], Math.max(fw, 30));
             }
 
@@ -397,6 +440,10 @@ function setupMaxBindings() {
 
     window.max.bindInlet("timesig", function(n, d) {
         timeSig.num = n; timeSig.den = d; draw();
+    });
+
+    window.max.bindInlet("key", function(idx) {
+        applyKeyIndex(idx); draw();
     });
 
     window.max.bindInlet("reset", function() {
