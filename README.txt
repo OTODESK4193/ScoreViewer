@@ -2,6 +2,8 @@
  LiveScoreViewer  (Max for Live MIDI Device)
 ==================================================
 
+![Downloads](https://img.shields.io/github/downloads/OTODESK4193/ANATOMY/total.svg)
+
 Ableton Live のMIDIクリップを、選択／再生に合わせてリアルタイムに
 五線譜で表示する Max for Live デバイスです。
 
