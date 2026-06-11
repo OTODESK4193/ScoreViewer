@@ -1,6 +1,6 @@
-==================================================
+
  LiveScoreViewer  (Max for Live MIDI Device)
-==================================================
+
 
 ![Downloads](https://img.shields.io/github/downloads/OTODESK4193/ANATOMY/total.svg)
 
@@ -48,6 +48,4 @@ Ableton Live のMIDIクリップを、選択／再生に合わせてリアルタ
     VexFlow は MIT ライセンスで配布されています。
   - 本デバイスは無料で配布・使用できます。
 
-==================================================
- LiveScoreViewer  v1.0   (free)
-==================================================
+
