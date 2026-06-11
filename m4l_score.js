@@ -1,5 +1,5 @@
 // ================================================================
-// m4l_score.js  v14  Phase 6 (beat-grouped beams, rest clef, exact width)
+// m4l_score.js  v15  Phase 6 (beat-grouped beams, rest clef, exact width)
 // ================================================================
 
 window.onerror = function(msg, src, line) {
@@ -19,7 +19,7 @@ let barMeters  = [];
 let currentBar = 0;
 
 // clef mode: 0 = treble, 1 = bass, 2 = grand, 3 = auto
-let clefMode   = 0;
+let clefMode   = 3;   // default = Auto
 const SPLIT_PITCH = 60;
 
 let keySpec    = "C";
