@@ -25,6 +25,7 @@ Ableton Live のMIDIクリップを、選択／再生に合わせてリアルタ
      - dict_to_json.js
      - meter_scan.js
      - follow.js
+     - score_url.js
    ※ これらは必ず同じフォルダに一緒に置いてください。1つでも欠けると動きません。
 
 2. Ableton Live で、MIDIトラックに LiveScoreViewer.amxd を読み込みます
